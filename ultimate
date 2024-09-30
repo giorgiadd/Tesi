@@ -10,30 +10,24 @@ mu_sun = pk.MU_SUN  # Parametro gravitazionale del Sole
 m0 = 1000  # Massa iniziale (kg)
 Isp = 2000  # Impulso specifico (s)
 g0 = 9.80665  # Accelerazione gravitazionale (m/s^2)
-tof = 348.76 * pk.DAY2SEC  # Tempo di volo totale (in secondi)
+tof = 348.79 * pk.DAY2SEC  # Tempo di volo totale (in secondi)
 tof_half = tof / 2  # Metà del tempo di volo
 
+# Posizione della Terra
 
-# Effemeridi
-epoch_departure = pk.epoch_from_string("2024-01-01 00:00:00")
-earth = pk.planet.jpl_lp('earth')
-mars = pk.planet.jpl_lp('mars')
-#r_earth, v_earth = earth.eph(epoch_departure)
 r_earth = [-140699693*10**3, -51614428*10**3, 980*10**3]  #m lista, propagate lagrangian vuole liste
 v_earth = [9.774596*10**3, -28.07828*10**3, 4.337725*10**(-4)*10**3]  #m/s
-epoch_arrival = pk.epoch(epoch_departure.mjd2000 + tof / pk.DAY2SEC)
-r_mars, v_mars = mars.eph(epoch_arrival)
 
-a_transfer = (np.linalg.norm(r_earth)+np.linalg.norm(r_mars))/2
-#v0_transfer0 = np.sqrt(mu_sun*(2/np.linalg.norm(r_earth)-1/a_transfer))
-#v1_transfer1 = np.sqrt(mu_sun*(2/np.linalg.norm(r_mars)-1/a_transfer))
+#Posizione di Marte
+
+r_mars = [-172682023*10**3, 176959469*10**3, 7948912*10**3]  #km
+v_mars = [-16.427384*10**3, -14.860506*10**3, 9.21486*10**(-2)*10**3]  #km/s
 
 
 # Risoluzione del problema di Lambert
 lambert = pk.lambert_problem(r_earth, r_mars, tof, mu_sun)
 v0_transfer = lambert.get_v1()[0]
 v1_transfer = lambert.get_v2()[0]
-
 
 
 def rotation_matrix(alpha, beta, gamma):
@@ -92,28 +86,43 @@ class MarsMissionOptimization:
 
 
         # Propagazione avanti
-        r_fwd, v_fwd = pk.propagate_lagrangian(self.r_earth, v0_transfer_rot, self.tof_half, self.mu_sun)
-        rf_M, vf_M = pk.propagate_lagrangian(self.r_earth, v0_transfer_rot, self.tof_half*2, self.mu_sun)
+        r_fwd, v_fwd = pk.propagate_lagrangian(self.r_earth, v0_transfer_rot, self.tof_half, self.mu_sun)   #propagazione in avanti fino a metà traiettoria
+        rf_M, vf_M = pk.propagate_lagrangian(self.r_earth, v0_transfer_rot, self.tof_half*2, self.mu_sun)   #propagazione per l'intera traiettoria
 
 
         # Propagazione indietro
-        r_bwd, v_bwd = pk.propagate_lagrangian(self.r_mars, v1_transfer_rot, -self.tof_half, self.mu_sun)
-        rf_E, vf_E = pk.propagate_lagrangian(self.r_mars, v1_transfer_rot, self.tof_half*2, self.mu_sun)
+        r_bwd, v_bwd = pk.propagate_lagrangian(self.r_mars, v1_transfer_rot, -self.tof_half, self.mu_sun)   #propagazione all'indietro fino a metà traiettoria
+        rf_E, vf_E = pk.propagate_lagrangian(self.r_mars, v1_transfer_rot, -self.tof_half*2, self.mu_sun)   #propagazione all'indietro per l'intera traiettoria
 
 
         # Equazione di Tsiolkovsky
         delta_v = np.linalg.norm(v0_transfer_rot - v_earth)  # Delta-v necessario per partire
         mf = self.m0 * np.exp(-delta_v / (self.Isp * self.g0))  # Massa finale
+        dV_fwd = np.linalg.norm(np.array(v_fwd) - v_earth)
+        dV_bwd = np.linalg.norm(np.array(v_bwd) - v_mars)
+        m_fwd = self.m0 * np.exp(-dV_fwd / (self.Isp * self.g0)) #massa a metà traiettoria andando avanti
+        m_bwd = self.m0 * np.exp(-dV_bwd / (self.Isp * self.g0)) #massa a metà traiettoria andando indietro
 
 
         # Penalità per i vincoli: r_fwd deve essere uguale a r_bwd
-        penalty = 1e8 * (np.linalg.norm(np.array(r_fwd) - np.array(r_bwd)))  # Penalità proporzionale alla distanza tra r_fwd e r_bwd
-        penalty_mars = 1e8 * np.linalg.norm(np.array(rf_M)-np.array(r_mars))
-        penalty_earth = 1e8 * np.linalg.norm(np.array(rf_E)-np.array(r_earth))
+        penalty1 =(np.linalg.norm(np.array(r_fwd) - np.array(r_bwd)))  # Penalità proporzionale alla distanza tra r_fwd e r_bwd
+        penalty = np.zeros(3)
+        penalty[0] = 1e-12 * (r_fwd[0]-r_bwd[0])
+        penalty[1] = 1e-12 * (r_fwd[1]-r_bwd[1])
+        penalty[2] = 1e-12 * (r_fwd[2]-r_bwd[2])
+
+
+        
+        penalty_v = np.zeros(3)
+        penalty_v[0] =1e-3 * (v_fwd[0]-v_bwd[0])
+        penalty_v[1] = 1e-3 * (v_fwd[1]-v_bwd[1])
+        penalty_v[2] = 1e-3 * (v_fwd[2]-v_bwd[2])
+
+        penalty_m =   (m_fwd - m_bwd)
 
 
         # Obiettivo: massimizzare la massa finale e includere i vincoli con una penalità
-        J = -mf + penalty + penalty_mars + penalty_earth# Pygmo massimizza minimizzando, quindi ritorniamo -mf
+        J = -mf +  penalty1 + penalty_m + penalty[0] + penalty[1] + penalty[2] + penalty_m + penalty_v[0] + penalty_v[1] + penalty_v[2] # Pygmo massimizza minimizzando, quindi ritorniamo -mf
 
 
         return [J]
@@ -121,7 +130,7 @@ class MarsMissionOptimization:
 
     # Limiti sui parametri decisionali
     def get_bounds(self):
-        return ([-0.1,-0.1,-0.1,-0.1,-0.1,-0.1], [0.1,0.1, 0.1,0.1, 0.1,0.1])
+        return ([-0.01,-0.01,-0.01,-0.01,-0.01,-0.01], [0.01,0.01, 0.01,0.01, 0.01,0.01])
 
 
 # Ora creiamo il problema usando pg.problem
@@ -136,11 +145,12 @@ algo = pg.algorithm(pg.de(gen=100))
 pop = pg.population(prob, size=10)
 
 
-# Eseguiamo l'ottimizzazione
 pop = algo.evolve(pop)
 
 
+
 # Risultati
+
 print(pop.champion_f)  # Massa finale massimizzata
 print(pop.champion_x)  # Angolo di rotazione ottimale
 
@@ -154,45 +164,48 @@ rotation_matrix1 = rotation_matrix(alpha1, beta1, gamma1)
 v0_transfer_rot = np.dot(rotation_matrix0, v0_transfer)
 v1_transfer_rot = np.dot(rotation_matrix1, v1_transfer)
 
-        
 delta_v = np.linalg.norm(v0_transfer_rot - v_earth)
 
-print(delta_v)
 
 mf = m0 * np.exp(-delta_v / (Isp * g0))  # Massa finale
 
 print(mf)
 
 
-times_half = np.linspace(0, tof_half, 250)
+times_half = np.linspace(0, tof_half, 500)
 r_fwd = np.array([pk.propagate_lagrangian(r_earth, v0_transfer_rot, t, mu_sun)[0] for t in times_half])
 
-times_back_from_mars = np.linspace(0, -tof_half, 250)
+times_back_from_mars = np.linspace(0, -tof_half, 500)
 r_bwd = np.array([pk.propagate_lagrangian(r_mars, v1_transfer_rot, t, mu_sun)[0] for t in times_back_from_mars])
+
+
+r_fwd_f, v_fwd_f = pk.propagate_lagrangian(r_earth, v0_transfer_rot, tof_half, mu_sun)
+
+r_bwd_f, v_bwd_f = pk.propagate_lagrangian(r_mars, v1_transfer_rot, -tof_half, mu_sun)
+
 
 
 # Plot della traiettoria in 3D
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
 
-# Traiettoria completa (andata e ritorno)
+
+# Traccia la traiettoria completa (andata e ritorno)
 ax.plot(r_fwd[:,0], r_fwd[:, 1], r_fwd[:, 2], label='Traiettoria di andata', color='blue')
 ax.plot(r_bwd[:, 0], r_bwd[:, 1], r_bwd[:, 2], label='Traiettoria di ritorno', color='purple')
 
+# Terra e Marte
 ax.scatter(r_earth[0], r_earth[1], r_earth[2], color='green', label='Terra (Partenza)')
 ax.scatter(r_mars[0], r_mars[1], r_mars[2], color='red', label='Marte (Arrivo)')
-#ax.scatter(r_half[0], r_half[1], r_half[2], color='orange', label='Metà percorso')
 
+
+# Imposta le etichette e visualizza
 ax.set_xlabel('X (km)')
 ax.set_ylabel('Y (km)')
 ax.set_zlabel('Z (km)')
 ax.legend()
 plt.title("Traiettoria divisa: Terra -> Marte e Ritorno Inverso (da Marte a metà percorso)")
 plt.show()
-
-
-
-
 
 
 
