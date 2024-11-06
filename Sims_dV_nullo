@@ -1,0 +1,285 @@
+
+#Traiettoria Hohmann con metodo Sims-Flanagan a impulsi nulli Terra-Marte 
+
+
+import pykep as pk
+import numpy as np
+import matplotlib.pyplot as plt
+import pygmo as pg
+from scipy.optimize import basinhopping
+
+
+m0 = 1000
+Isp = 2000
+g0 = 9.80665
+
+mu_sun = pk.MU_SUN*10**(-9)  # Parametro gravitazionale del Sole in km^3/s^2
+
+r_earth = 1.496e8  # Radius of Earth's orbit in km
+r_mars = 2.279e8   # Radius of Mars' orbit in km
+v_earth = np.sqrt(mu_sun/r_earth)
+v_mars = np.sqrt(mu_sun/r_mars)
+
+r0 = [-r_earth, 0, 0]
+rM = [r_mars, 0, 0]
+v0 = [0, -v_earth, 0]
+vM = [0, v_mars, 0]
+
+a_transfer = (np.linalg.norm(r0) + np.linalg.norm(rM)) / 2  # km
+tof = np.pi * np.sqrt(a_transfer**3 / mu_sun)# Tempo di volo (s)
+
+
+v0_transfer = np.sqrt(mu_sun*(2/np.linalg.norm(r0)-1/a_transfer))
+v1_transfer = np.sqrt(mu_sun*(2/np.linalg.norm(rM)-1/a_transfer))
+
+v0_transfer_vec = [0, -v0_transfer, 0]
+v1_transfer_vec = [0, v1_transfer, 0]
+
+dV = np.array([0,0,0])
+
+n_seg = 20
+
+n_fwd = (n_seg+1)//2
+n_bwd = n_seg//2
+
+print(n_fwd, n_bwd)
+
+dV_fwd = np.zeros((n_fwd, 3))
+dV_bwd = np.zeros((n_bwd, 3))
+
+
+def sims(r0,rM,v0_transfer_vec,v1_transfer_vec,tof, dV_fwd, dV_bwd, n_fwd, n_bwd):
+
+    t_seg_mid_fwd = tof/2/(n_fwd*2)
+    t_seg_fwd = tof/2/n_fwd
+
+    t_seg_mid_bwd = tof/2/(n_bwd*2)
+    t_seg_bwd = tof/2/n_bwd
+
+    r_fwd_list = [r0]
+    r_bwd_list = [rM]
+
+    #forward propagation
+
+    r, v = pk.propagate_lagrangian(r0, v0_transfer_vec, t_seg_mid_fwd, mu_sun)  #arrivo a metà primo segmento
+
+    r_fwd_list.append(r)
+
+    v = v + dV_fwd[0]  #aggiungo il primo dV sempre a metà primo segmento
+    
+    for i in range(n_fwd-1):
+
+        r_fwd, v_fwd= pk.propagate_lagrangian(r, v, t_seg_fwd, mu_sun)   #così arrivo a metà del secondo segmento
+
+        v = v_fwd + dV_fwd[i+1]  #aggiungo il dV a metà segmento
+
+        r_fwd_list.append(r_fwd)
+
+        r = r_fwd
+
+    #ora sono a metà dell'ultimo segmento della leg forward
+
+    r_fwd, v_fwd = pk.propagate_lagrangian(r, v, t_seg_mid_fwd, mu_sun)  #così arrivo al match point
+    r_fwd_list.append(r_fwd)
+
+    #backward propagation
+    
+    r_b, v_b = pk.propagate_lagrangian(rM, v1_transfer_vec, -t_seg_mid_bwd, mu_sun)  #arrivo a metà primo segmento all'indietro
+
+    r_bwd_list.append(r_b)
+
+    v_b = v_b + dV_bwd[0]  #aggiungo il primo dV sempre a metà primo segmento
+
+    for i in range(n_bwd-1):
+
+        r_bwd, v_bwd = pk.propagate_lagrangian(r_b, v_b, -t_seg_bwd, mu_sun) 
+
+        v_b = v_bwd + dV_bwd[i+1]
+
+        r_bwd_list.append(r_bwd)
+
+        r_b = r_bwd
+
+    r_bwd, v_bwd = pk.propagate_lagrangian(r_b, v_b, -t_seg_mid_bwd, mu_sun)   #arrivo al match point
+    r_bwd_list.append(r_bwd)
+
+
+    return r_fwd, v_fwd, r_bwd, v_bwd, r_fwd_list, r_bwd_list
+
+
+
+
+r, v, r_bwd, v_bwd, r_fwd_list, r_bwd_list = sims(r0,rM,v0_transfer_vec,v1_transfer_vec,tof, dV_fwd, dV_bwd, n_fwd, n_bwd)
+
+
+print('Errore x = ', r[0] - r_bwd[0] )
+print('Errore y = ', r[1] - r_bwd[1] )
+print('Errore z = ', r[2] - r_bwd[2] )
+
+
+#quello che ho appena fatto va all'interno dell'ottimizzazione, una volta trovati i dV giusti, devo raccogliere i risultati per fare la traiettoria (credo)
+#fino a qui tutto ok
+
+
+
+def collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd):
+
+    t_seg_mid_fwd = tof/2/(n_fwd*2)
+    t_seg_fwd = tof/2/n_fwd
+
+    t_seg_mid_bwd = tof/2/(n_bwd*2)
+    t_seg_bwd = tof/2/n_bwd
+
+    t_mid_vec_fwd = np.linspace(0, t_seg_mid_fwd, 50)
+    t_vec_fwd = np.linspace(0, t_seg_fwd, 50)
+    t_mid_vec_bwd = np.linspace(0, -t_seg_mid_bwd, 50)
+    t_vec_bwd = np.linspace(0, -t_seg_bwd, 50)
+
+    
+
+    # Lists to store the positions for plotting
+    r_fwd_list = [r0]  # Start with initial position
+    r_bwd_list = [rM]  # Start with Mars position for backward
+    v_fwd_list = [v0_transfer_vec]
+    v_bwd_list = [v1_transfer_vec]
+
+    dV_fwd_pos = []
+    dV_bwd_pos = []
+
+    for t in t_mid_vec_fwd:
+
+        r, v = pk.propagate_lagrangian(r0, v0_transfer_vec, t, mu_sun)  #arrivo a metà primo segmento
+
+        r_fwd_list.append(r)
+        v_fwd_list.append(v)
+
+    v = v + dV_fwd[0]
+    dV_fwd_pos.append(r)
+
+
+    for i in range(n_fwd-1):
+
+        for t in t_vec_fwd:
+
+            r_fwd_traj, v_fwd_traj = pk.propagate_lagrangian(r, v, t, mu_sun)
+
+            r_fwd_list.append(r_fwd_traj)
+            v_fwd_list.append(v_fwd_traj)
+
+        r = r_fwd_traj
+        v = v_fwd_traj + dV_fwd[i+1]
+        dV_fwd_pos.append(r)
+
+
+    for t in t_mid_vec_fwd:
+
+        r_fwd_traj, v_fwd_traj = pk.propagate_lagrangian(r, v, t, mu_sun)
+
+        r_fwd_list.append(r_fwd_traj)
+        v_fwd_list.append(v_fwd_traj)
+
+    last_r_fwd = r_fwd_list[-1]
+
+    for t in t_mid_vec_bwd:
+
+        r_b, v_b = pk.propagate_lagrangian(rM, v1_transfer_vec, t, mu_sun)  #arrivo a metà primo segmento
+
+        r_bwd_list.append(r_b)
+        v_bwd_list.append(v_b)
+
+    v_b = v_b + dV_bwd[0]
+    dV_bwd_pos.append(r_b)
+
+
+    for i in range(n_bwd-1):
+
+        for t in t_vec_bwd:
+
+            r_bwd_traj, v_bwd_traj = pk.propagate_lagrangian(r_b, v_b, t, mu_sun)
+
+            r_bwd_list.append(r_bwd_traj)
+            v_bwd_list.append(v_bwd_traj)
+
+        r_b = r_bwd_traj
+        v_b = v_bwd_traj + dV_bwd[i+1]
+        dV_bwd_pos.append(r_b)
+
+    for t in t_mid_vec_bwd:
+
+        r_bwd_traj, v_bwd_traj = pk.propagate_lagrangian(r_b, v_b, t, mu_sun)
+
+        r_bwd_list.append(r_bwd_traj)
+        v_bwd_list.append(v_bwd_traj)
+
+    last_r_bwd = r_bwd_list[-1]
+
+
+    return r_fwd_list, v_fwd_list, r_bwd_list, v_bwd_list, last_r_fwd, last_r_bwd, dV_fwd_pos, dV_bwd_pos
+
+
+r_fwd_list = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[0]
+v_fwd_list = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[1]
+r_bwd_list = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[2]
+v_bwd_list = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[3]
+last_r_fwd = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[4]
+last_r_bwd = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[5]
+dV_fwd_pos = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[6]
+dV_bwd_pos = collect_positions(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)[7]
+
+
+def plot_trajectory(r_fwd_list, r_bwd_list, last_r_fwd, last_r_bwd):
+
+    # Convert lists to arrays
+
+    r_fwd_array = np.array(r_fwd_list)
+    r_bwd_array = np.array(r_bwd_list)
+    dV_fwd_array = np.array(dV_fwd_pos)
+    dV_bwd_array = np.array(dV_bwd_pos)
+
+
+    # Create a figure and axis
+    fig, ax = plt.subplots()
+
+
+    # Plot the forward trajectory
+    ax.plot(r_fwd_array[:, 0], r_fwd_array[:, 1], label='Forward Trajectory', color='blue')
+
+
+    # Plot the backward trajectory
+    ax.plot(r_bwd_array[:, 0], r_bwd_array[:, 1], label='Backward Trajectory', color='red')
+
+    #deltaV
+    ax.scatter(dV_fwd_array[:, 0], dV_fwd_array[:, 1], color='cyan', marker='x', label='Dv_fwd')
+    ax.scatter(dV_bwd_array[:, 0], dV_bwd_array[:, 1], color='magenta', marker='x', label='Dv_bwd')
+
+  
+
+
+    # Mark the starting points of Earth and Mars
+    ax.scatter(r_fwd_array[0, 0], r_fwd_array[0, 1], color='green', label='Earth Start')
+    ax.scatter(r_bwd_array[0, 0], r_bwd_array[0, 1], color='orange', label='Mars Start')
+    ax.scatter(last_r_fwd[0], last_r_fwd[1], color='black', label='Match Point')
+    ax.scatter(last_r_bwd[0], last_r_bwd[1], color='black', label='Match Point')
+
+
+
+    # Add labels and legend
+    ax.set_xlabel('X Position (km)')
+    ax.set_ylabel('Y Position (km)')
+    ax.set_title('Spacecraft Trajectory (Sims-Flanagan)')
+    ax.legend()
+
+
+    # Show the plot
+    plt.grid(True)
+    plt.show()
+
+
+
+
+# Call the propagate function to do the propagation first
+#r_fwd, v_fwd, r_bwd, v_bwd = sims(r0, rM, v0_transfer_vec, v1_transfer_vec, tof, dV_fwd, dV_bwd, n_fwd, n_bwd)
+
+
+# Plot the collected positions
+plot_trajectory(r_fwd_list, r_bwd_list, last_r_fwd, last_r_bwd)
