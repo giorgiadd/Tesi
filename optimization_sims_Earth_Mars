@@ -1,0 +1,302 @@
+
+import pykep as pk
+import numpy as np
+import matplotlib.pyplot as plt
+import pygmo as pg
+from scipy.optimize import basinhopping
+from scipy.optimize import minimize
+from scipy.optimize import approx_fprime
+
+
+
+m0 = 1000    #kg
+m_ref = 1000     #kg
+m0_norm = m0/m_ref
+Isp = 2000      #s
+g0 = 9.80665        #m/s
+r_ref = 1.496e11   #unità astronomica in m
+print('r_ref = ', r_ref)
+mu_sun = pk.MU_SUN   #parametro gravitazionale in m^3/s^2
+v_ref = np.sqrt(mu_sun/r_ref)   #velocità orbitale in m/s di riferimento
+print('v_ref = ', v_ref)
+t_ref = np.sqrt(r_ref**3/mu_sun)   #tempo di riferimento
+mu_norm = mu_sun/(r_ref**3/t_ref**2)  #parametro gravitazionale normalizzato
+print('mu_norm = ',mu_norm)
+print('t_ref = ', t_ref * pk.SEC2DAY)
+r_earth = 1.496e11 # Radius of Earth's orbit in m
+r_mars = 2.279e8 *10**(3)  # Radius of Mars' orbit in m
+v_earth = np.sqrt(mu_sun/r_earth)
+print('v_earth = ', v_earth)
+v_mars = np.sqrt(mu_sun/r_mars)
+eps = 1e-8
+
+r0 = [-r_earth, 0, 0]
+r0_norm = np.array(r0)/r_ref
+rM = [r_mars, 0, 0]
+rM_norm = np.array(rM)/r_ref
+v0 = [0, -v_earth, 0]
+v0_norm = np.array(v0)/v_ref
+vM = [0, v_mars, 0]
+vM_norm = np.array(vM)/v_ref
+print('v0_norm = ', v0_norm, 'vM_norm = ',  vM_norm)
+
+a_transfer = (np.linalg.norm(r0) + np.linalg.norm(rM)) / 2  # km
+tof = np.pi * np.sqrt(a_transfer**3 / mu_sun)    # Tempo di volo (s)
+tof_days = 0.9 * tof*pk.SEC2DAY
+tof_norm = tof/t_ref
+print('tof_norm = ', tof_norm)
+tof_col = np.pi * np.sqrt(a_transfer**3 / mu_sun)*0.9
+
+times = np.linspace(0.9*tof_norm, 0.9 *tof_norm, 1)
+#times = np.linspace(times_a[6], times_a[6], 1)
+
+
+
+v0_transfer = np.sqrt(mu_sun*(2/np.linalg.norm(r0)-1/a_transfer))
+v1_transfer = np.sqrt(mu_sun*(2/np.linalg.norm(rM)-1/a_transfer))
+dV0 = abs(v0_transfer - v_earth)
+dV0_norm = dV0/v_ref
+dV1 = abs(v1_transfer - v_mars)
+dV1_norm = dV1/v_ref
+
+v0_transfer_vec = [0, -v0_transfer, 0]   #velocità di trasferimento di Hohmann per andare dalla Terra a Marte
+v0_transf_norm = np.array(v0_transfer_vec)/v_ref
+v1_transfer_vec = [0, v1_transfer, 0]    #velocità di trasferimento di Hohmann per andare da Marte alla Terra
+v1_transf_norm = np.array(v1_transfer_vec)/v_ref
+print('v0_transfer_norm = ', v0_transf_norm, 'v1_transfer_norm = ', v1_transf_norm)
+g0_norm = g0/(v_ref/t_ref)
+Isp_norm = Isp/t_ref
+
+
+
+
+n_seg = 20   #numero di segmenti con cui viene divisa la traiettoria
+
+n_fwd = (n_seg+1)//2    #segmenti traiettoria in avanti
+n_bwd = n_seg//2         #segmenti traiettoria in indietro
+
+max_dV = 1000           #massimo dV da applicare al centro di ogni segmento
+u_b = max_dV/v_ref      #upper bound
+l_b = -max_dV/v_ref      #lower bound
+
+
+def sims(r0,rM,v0_transfer_vec,v1_transfer_vec,tof, dV_fwd, dV_bwd, n_fwd, n_bwd, mu_sun):
+
+    t_seg_mid_fwd = tof/2/(n_fwd*2)
+    t_seg_fwd = tof/2/n_fwd
+
+    t_seg_mid_bwd = tof/2/(n_bwd*2)
+    t_seg_bwd = tof/2/n_bwd
+
+    #forward propagation
+
+    r, v = pk.propagate_lagrangian(r0, v0_transfer_vec, t_seg_mid_fwd, mu_sun)  #arrivo a metà primo segmento
+
+
+    v = v + dV_fwd[0]  #aggiungo il primo dV sempre a metà primo segmento
+    
+    for i in range(n_fwd-1):
+
+
+        r_fwd, v_fwd= pk.propagate_lagrangian(r, v, t_seg_fwd, mu_sun)   #così arrivo a metà del secondo segmento
+
+        v = v_fwd + dV_fwd[i+1]  #aggiungo il primo dV
+
+        r = r_fwd
+
+    #ora sono a metà dell'ultimo segmento della leg forward
+
+    r_fwd, v_fwd = pk.propagate_lagrangian(r, v, t_seg_mid_fwd, mu_sun)  #così arrivo al match point
+
+
+    #backward propagation
+    
+    r_b, v_b = pk.propagate_lagrangian(rM, v1_transfer_vec, -t_seg_mid_bwd, mu_sun)  #arrivo a metà primo segmento all'indietro
+
+    v_b = v_b + dV_bwd[0]  #aggiungo il primo dV sempre a metà primo segmento
+
+    for i in range(n_bwd-1):
+
+        r_bwd, v_bwd = pk.propagate_lagrangian(r_b, v_b, -t_seg_bwd, mu_sun) 
+
+        v_b = v_bwd + dV_bwd[i+1]
+
+        r_b = r_bwd
+
+    r_bwd, v_bwd = pk.propagate_lagrangian(r_b, v_b, -t_seg_mid_bwd, mu_sun)   #arrivo al match point
+
+
+    return r_fwd, v_fwd, r_bwd, v_bwd
+
+
+class Optimization:
+
+    def __init__(self, u_b, l_b, r0, rM, m0, Isp, g0, mu_sun, tof, v0, vM, n_fwd, n_bwd, v0_transfer_vec, v1_transfer_vec, dV0, dV1, v_ref, tol=1e-6):
+
+        
+        self.u_b = u_b
+        self.l_b = l_b
+        self.r0 = r0
+        self.rM = rM
+        self.m0 = m0
+        self.Isp = Isp
+        self.g0 = g0
+        self.mu_sun = mu_sun
+        self.tof = tof
+        self.v0 = v0
+        self.vM = vM
+        self.n_fwd = n_fwd
+        self.n_bwd = n_bwd
+        self.v0_transfer_vec = v0_transfer_vec
+        self.v1_transfer_vec = v1_transfer_vec
+        self.dV0 = dV0
+        self.dV1 = dV1
+        self.v_ref = v_ref
+        self.tol = tol
+
+    def fitness(self, x):
+
+        print("Optimization variables (x):", x)
+
+        #definisco le variabili di ottimizzazione
+
+        
+        dV_fwd = np.hstack((x[:2 * self.n_fwd].reshape(self.n_fwd, 2),np.zeros((self.n_fwd, 1))))
+        dV_bwd = np.hstack((x[2 * self.n_fwd:2 * (self.n_fwd + self.n_bwd)].reshape(self.n_bwd, 2), np.zeros((self.n_bwd, 1))))
+
+        print("dV_fwd (forward segments):", dV_fwd)
+        print("dV_bwd (backward segments):", dV_bwd)
+
+
+        #trovo i raggi e le velocità al match point
+
+        r, v, r_bwd, v_bwd = sims(self.r0, self.rM, self.v0_transfer_vec, self.v1_transfer_vec, self.tof, dV_fwd, dV_bwd, self.n_fwd, self.n_bwd, self.mu_sun)
+
+        total_dV_fwd = np.sum(np.linalg.norm(dV_fwd, axis=1))
+        total_dV_bwd = np.sum(np.linalg.norm(dV_bwd, axis=1))
+        mass = self.m0 * np.exp(-dV0/(self.Isp * self.g0))
+        mf = mass * np.exp(-total_dV_fwd/(self.Isp * self.g0))* np.exp(-dV1/(self.Isp * self.g0))* np.exp(-total_dV_bwd/(self.Isp * self.g0))
+
+        m_fwd = mass * np.exp(-total_dV_fwd/(self.Isp * self.g0))
+        m_bwd = mf * np.exp(dV1/(self.Isp * self.g0))* np.exp(total_dV_bwd/(self.Isp * self.g0))
+        
+
+        
+        c_mpr = self.tol - np.linalg.norm(np.array(r) - np.array(r_bwd)) 
+
+
+        c_mpv = self.tol - np.linalg.norm(np.array(v) - np.array(v_bwd))
+
+        c_mpm = 1e-6 - abs(m_fwd - m_bwd)
+
+        J = [-mf, c_mpr, c_mpv, c_mpm]
+
+        return J
+    
+    def get_bounds(self):
+
+        bounds = ([self.l_b] * (2 * (self.n_fwd + self.n_bwd)), [self.u_b] * (2 * (self.n_fwd + self.n_bwd)))
+
+        return bounds
+    
+    def get_nec(self):
+
+        return 0
+    
+    def get_nic(self):
+
+        return 3
+
+    
+
+dVs = []
+Error_r = []
+Error_v = []
+Error_m = []
+mfs = []
+
+
+for tof_norm in times:
+
+    optimization = Optimization(u_b, l_b, r0_norm, rM_norm, m0_norm, Isp, g0, mu_norm, tof_norm, v0_norm, vM_norm, n_fwd, n_bwd, v0_transf_norm, v1_transf_norm, dV0, dV1, v_ref)
+
+    def objective(x):
+        return optimization.fitness(x)[0]
+
+    def gradient(x):
+
+        return approx_fprime(x, objective, eps)        #gradient of the objective function
+
+    def grad_c_mpr(x):
+
+        return approx_fprime(x, lambda x: optimization.fitness(x)[1], eps)   #gradient of the first constraint
+
+    def grad_c_mpv(x):
+
+        return approx_fprime(x, lambda x: optimization.fitness(x)[2], eps)     #gradient of the second constraint
+
+    def grad_c_mpm(x):
+
+        return approx_fprime(x, lambda x: optimization.fitness(x)[3], eps)      #gradient of the third constraint
+
+
+
+    constraints = [
+        {'type': 'ineq', 'fun': lambda x: optimization.fitness(x)[1], 'jac': grad_c_mpr},
+        {'type': 'ineq', 'fun': lambda x: optimization.fitness(x)[2], 'jac': grad_c_mpv},
+        {'type': 'ineq', 'fun': lambda x: optimization.fitness(x)[3], 'jac': grad_c_mpm}
+    ]
+
+
+    x0 = np.random.uniform(l_b, u_b, 2 * (n_fwd + n_bwd))
+
+    minimizer = minimize(objective, x0 , method='SLSQP', jac = gradient, constraints=constraints, bounds=[(l_b, u_b)] * (2*(n_fwd + n_bwd)), tol=1e-7)  #ho provato ad usare 1e-11 ma è troppo    
+    result = minimizer
+
+
+
+
+    dV_f_norm = np.hstack((result.x[:2 * n_fwd].reshape(n_fwd, 2),np.zeros((n_fwd, 1))))
+    dV_b_norm = np.hstack((result.x[2 * n_fwd:2 * (n_fwd + n_bwd)].reshape(n_bwd, 2), np.zeros((n_bwd, 1))))
+
+
+    r_fwd = sims(r0_norm,rM_norm,v0_transf_norm,v1_transf_norm,tof_norm, dV_f_norm, dV_b_norm, n_fwd, n_bwd, mu_norm)[0]
+    r_bwd = sims(r0_norm,rM_norm,v0_transf_norm,v1_transf_norm,tof_norm, dV_f_norm, dV_b_norm, n_fwd, n_bwd, mu_norm)[2]
+    v_fwd = sims(r0_norm,rM_norm,v0_transf_norm,v1_transf_norm,tof_norm, dV_f_norm, dV_b_norm, n_fwd, n_bwd, mu_norm)[1]
+    v_bwd = sims(r0_norm,rM_norm,v0_transf_norm,v1_transf_norm,tof_norm, dV_f_norm, dV_b_norm, n_fwd, n_bwd, mu_norm)[3]
+    
+    error_r = np.linalg.norm(np.array(r_fwd) - np.array(r_bwd))
+    error_v = np.linalg.norm(np.array(v_fwd) - np.array(v_bwd))
+
+    Error_r.append(error_r)
+    Error_v.append(error_v)
+
+
+
+    dV_fwd = np.hstack((result.x[:2 * n_fwd].reshape(n_fwd, 2)*v_ref,np.zeros((n_fwd, 1))))
+    dV_bwd = np.hstack((result.x[2 * n_fwd:2 * (n_fwd + n_bwd)].reshape(n_bwd, 2)*v_ref, np.zeros((n_bwd, 1))))
+
+
+    total_dV_fwd = np.sum(np.linalg.norm(dV_fwd, axis=1))
+    total_dV_bwd = np.sum(np.linalg.norm(dV_bwd, axis=1))
+
+    total_dV = total_dV_fwd + total_dV_bwd
+
+    dVs.append(total_dV)
+
+    mass = m0 * np.exp(-dV0/(Isp * g0))
+    mf = mass * np.exp(-total_dV_fwd/(Isp * g0))* np.exp(-dV1/(Isp * g0))* np.exp(-total_dV_bwd/(Isp * g0))
+
+    m_fwd = mass * np.exp(-total_dV_fwd/(Isp * g0))
+    m_bwd = mf * np.exp(dV1/(Isp * g0))* np.exp(total_dV_bwd/(Isp * g0))
+
+    error_m = abs(m_fwd - m_bwd)
+    Error_m.append(error_m)
+
+    mfs.append(mf)
+
+print('error r = ', Error_r)
+times_arr = (np.array(times)*t_ref)*pk.SEC2DAY
+print('times = ', times_arr)
+print('dv tot = ', total_dV)
+
