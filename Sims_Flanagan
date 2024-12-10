@@ -1,0 +1,49 @@
+import pykep as pk
+
+def sims_flanagan(r0,rM,v0_transfer_vec,v1_transfer_vec,tof, dV_fwd, dV_bwd, n_fwd, n_bwd, mu_sun):
+
+    t_seg_mid_fwd = tof/2/(n_fwd*2)
+    t_seg_fwd = tof/2/n_fwd
+
+    t_seg_mid_bwd = tof/2/(n_bwd*2)
+    t_seg_bwd = tof/2/n_bwd
+
+    #forward propagation
+
+    r, v = pk.propagate_lagrangian(r0, v0_transfer_vec, t_seg_mid_fwd, mu_sun)  #arrivo a metà primo segmento
+
+
+    v = v + dV_fwd[0]  #aggiungo il primo dV sempre a metà primo segmento
+    
+    for i in range(n_fwd-1):
+
+
+        r_fwd, v_fwd= pk.propagate_lagrangian(r, v, t_seg_fwd, mu_sun)   #così arrivo a metà del secondo segmento
+
+        v = v_fwd + dV_fwd[i+1]  #aggiungo il primo dV
+
+        r = r_fwd
+
+    #ora sono a metà dell'ultimo segmento della leg forward
+
+    r_fwd, v_fwd = pk.propagate_lagrangian(r, v, t_seg_mid_fwd, mu_sun)  #così arrivo al match point
+
+
+    #backward propagation
+    
+    r_b, v_b = pk.propagate_lagrangian(rM, v1_transfer_vec, -t_seg_mid_bwd, mu_sun)  #arrivo a metà primo segmento all'indietro
+
+    v_b = v_b + dV_bwd[0]  #aggiungo il primo dV sempre a metà primo segmento
+
+    for i in range(n_bwd-1):
+
+        r_bwd, v_bwd = pk.propagate_lagrangian(r_b, v_b, -t_seg_bwd, mu_sun) 
+
+        v_b = v_bwd + dV_bwd[i+1]
+
+        r_b = r_bwd
+
+    r_bwd, v_bwd = pk.propagate_lagrangian(r_b, v_b, -t_seg_mid_bwd, mu_sun)   #arrivo al match point
+
+
+    return r_fwd, v_fwd, r_bwd, v_bwd
